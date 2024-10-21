@@ -12,7 +12,7 @@ import numpy as np
 import abc
 import random
 import os
-
+import re
 
 class FewShotDataset(Dataset):
 
@@ -22,7 +22,8 @@ class FewShotDataset(Dataset):
     def __init__(self, examples_per_class: int = None, 
                  generative_aug: GenerativeAugmentation = None, 
                  synthetic_probability: float = 0.5,
-                 synthetic_dir: str = None):
+                 synthetic_dir: str = None,
+                 negative_probability: float = 0.0):
 
         self.examples_per_class = examples_per_class
         self.generative_aug = generative_aug
@@ -30,6 +31,8 @@ class FewShotDataset(Dataset):
         self.synthetic_probability = synthetic_probability
         self.synthetic_dir = synthetic_dir
         self.synthetic_examples = defaultdict(list)
+
+        self.negative_probability = negative_probability
 
         self.transform = transforms.Compose([
             transforms.ToTensor(),
@@ -61,19 +64,43 @@ class FewShotDataset(Dataset):
         self.synthetic_examples.clear()
         options = product(range(len(self)), range(num_repeats))
 
+        if self.synthetic_dir is not None and os.path.exists(self.synthetic_dir) and len(os.listdir(self.synthetic_dir)) > 0:
+
+            print("Loading existing dataset. PRNG will diverge from direct augment->train, so ensure evaluation does not use both direct and deferred datasets for reproducibility.")
+
+            for (idx, num), filename in tqdm(zip(options, sorted(os.listdir(self.synthetic_dir),key=lambda s: tuple(map(int,re.findall(r"\d+",s))))), desc="Loading Existing Augmentations"):
+
+                if not filename.startswith(f"aug-{idx}-{num}"): print(f"error: expected aug-{idx}-{num}..., got {filename}")
+
+                image = os.path.join(self.synthetic_dir, filename)
+                label = self.get_label_by_idx(idx)
+
+                self.synthetic_examples[idx].append((image, label))
+
+            return
+
         for idx, num in tqdm(list(
                 options), desc="Generating Augmentations"):
 
             image = self.get_image_by_idx(idx)
             label = self.get_label_by_idx(idx)
+            metadata = self.get_metadata_by_idx(idx)
+
+            use_negative_example = np.random.uniform() < self.negative_probability
+            aug_base_idx = idx
+            if use_negative_example:
+                while label == self.get_label_by_idx(aug_base_idx):
+                    aug_base_idx = np.random.randint(len(self))
+                image = self.get_image_by_idx(aug_base_idx)
 
             image, label = self.generative_aug(
-                image, label, self.get_metadata_by_idx(idx))
+                image, label, metadata)
 
             if self.synthetic_dir is not None:
 
+                filename = f"aug-{idx}-{num}-neg{aug_base_idx}.png" if use_negative_example else f"aug-{idx}-{num}.png"
                 pil_image, image = image, os.path.join(
-                    self.synthetic_dir, f"aug-{idx}-{num}.png")
+                    self.synthetic_dir, filename)
 
                 pil_image.save(image)
 

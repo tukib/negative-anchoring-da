@@ -80,6 +80,7 @@ def run_experiment(examples_per_class: int = 0,
                    compose: str = "parallel",
                    synthetic_probability: float = 0.5, 
                    synthetic_dir: str = DEFAULT_SYNTHETIC_DIR, 
+                   negative_probability: float = 0.0,
                    embed_path: str = DEFAULT_EMBED_PATH,
                    model_path: str = DEFAULT_MODEL_PATH,
                    prompt: str = DEFAULT_PROMPT,
@@ -88,7 +89,8 @@ def run_experiment(examples_per_class: int = 0,
                    use_cutmix: bool = False,
                    erasure_ckpt_path: str = None,
                    image_size: int = 256,
-                   classifier_backbone: str = "resnet50"):
+                   classifier_backbone: str = "resnet50",
+                   single_aug_run: bool = False):
 
     torch.manual_seed(seed)
     np.random.seed(seed)
@@ -122,12 +124,17 @@ def run_experiment(examples_per_class: int = 0,
         split="train", examples_per_class=examples_per_class, 
         synthetic_probability=synthetic_probability, 
         synthetic_dir=synthetic_dir,
+        negative_probability=negative_probability,
         use_randaugment=use_randaugment,
         generative_aug=aug, seed=seed,
         image_size=(image_size, image_size))
 
     if num_synthetic > 0 and aug is not None:
         train_dataset.generate_augmentations(num_synthetic)
+
+    if single_aug_run: raise Exception("Dataset saved, forcibly exiting early. May break SBATCH if there is more than one worker thread.")
+    
+    print("DataLoader set to use main thread as pickle fails to serialise the dataset class otherwise.")
 
     cutmix_dataset = None
     if use_cutmix and IS_CUTMIX_INSTALLED:
@@ -143,7 +150,7 @@ def run_experiment(examples_per_class: int = 0,
     train_dataloader = DataLoader(
         cutmix_dataset if cutmix_dataset is not None else 
         train_dataset, batch_size=batch_size, 
-        sampler=train_sampler, num_workers=4)
+        sampler=train_sampler, num_workers=0)
 
     val_dataset = DATASETS[dataset](
         split="val", seed=seed,
@@ -155,7 +162,7 @@ def run_experiment(examples_per_class: int = 0,
 
     val_dataloader = DataLoader(
         val_dataset, batch_size=batch_size, 
-        sampler=val_sampler, num_workers=4)
+        sampler=val_sampler, num_workers=0)
 
     model = ClassificationModel(
         train_dataset.num_classes, 
@@ -378,6 +385,7 @@ if __name__ == "__main__":
 
     parser.add_argument("--synthetic-probability", type=float, default=0.5)
     parser.add_argument("--synthetic-dir", type=str, default=DEFAULT_SYNTHETIC_DIR)
+    parser.add_argument("--negative-probability", type=float, default=0.0)
     
     parser.add_argument("--image-size", type=int, default=256)
     parser.add_argument("--classifier-backbone", type=str, 
@@ -417,6 +425,10 @@ if __name__ == "__main__":
     parser.add_argument("--use-cutmix", action="store_true")
 
     parser.add_argument("--tokens-per-class", type=int, default=4)
+
+    parser.add_argument("--seed-offset", type=int, default=0)
+
+    parser.add_argument("--single-aug-run", type=int, default=0)
     
     args = parser.parse_args()
 
@@ -442,13 +454,14 @@ if __name__ == "__main__":
 
         hyperparameters = dict(
             examples_per_class=examples_per_class,
-            seed=seed, 
+            seed=seed + args.seed_offset, 
             dataset=args.dataset,
             num_epochs=args.num_epochs,
             iterations_per_epoch=args.iterations_per_epoch, 
             batch_size=args.batch_size,
             model_path=args.model_path,
-            synthetic_probability=args.synthetic_probability, 
+            synthetic_probability=args.synthetic_probability,
+            negative_probability=args.negative_probability, 
             num_synthetic=args.num_synthetic, 
             prompt=args.prompt, 
             tokens_per_class=args.tokens_per_class,
@@ -463,7 +476,8 @@ if __name__ == "__main__":
             use_cutmix=args.use_cutmix,
             erasure_ckpt_path=args.erasure_ckpt_path,
             image_size=args.image_size,
-            classifier_backbone=args.classifier_backbone)
+            classifier_backbone=args.classifier_backbone,
+            single_aug_run=True if args.single_aug_run > 0 else False)
 
         synthetic_dir = args.synthetic_dir.format(**hyperparameters)
         embed_path = args.embed_path.format(**hyperparameters)
@@ -472,7 +486,7 @@ if __name__ == "__main__":
             synthetic_dir=synthetic_dir, 
             embed_path=embed_path, **hyperparameters))
 
-        path = f"results_{seed}_{examples_per_class}.csv"
+        path = f"results_{seed + args.seed_offset}_{examples_per_class}.csv"
         path = os.path.join(args.logdir, path)
 
         pd.DataFrame.from_records(all_trials).to_csv(path)
